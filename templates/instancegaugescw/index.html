@@ -1,0 +1,488 @@
+{% extends 'base.html' %}
+{% load i18n %}
+{% load set_var %}
+
+{% block title %}{% trans "CW Instances" %}{% endblock %}
+
+{% block page_header %}
+  {% include "horizon/common/_page_header.html" with title=_("CW Istances") %}
+
+<script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+
+{% endblock page_header %}
+
+{% block main %}
+
+<div id="pool"></div>
+<div id="host"></div>
+<div id="vms"></div>
+
+
+<div id="loading_bar"></div>
+<div id="novacpts_list"></div>
+<table style="width:100%; table-layout:fixed; border-spacing: 0 15px; border-collapse: separate;">
+	&nbsp;
+	<tr>
+		<td align="center">
+			<div id="novacpt_box"></div>
+		</td>
+	</tr>
+	&nbsp;
+	<tr>
+		<td align="center">
+			<div id="instances_box"></div>
+		</td>
+	</tr>
+	&nbsp;
+</table>
+
+<script>
+	function create_instances_table(){
+		var x = document.getElementById('novacpts_list');
+		var content = '<table style="width:100%; table-layout: fixed;"><tr>';
+		for(i=0;i<9;i++){
+			var cpt_number = i+1;
+			var title = "nova-cpt"+cpt_number;
+			var td_size ='<td width="12%">';
+
+			if(i!=8) td_size ='<td width="11%">';
+			content += td_size+'<table><tr><td align="center"><b>nova-cpt'+cpt_number+'</b></td></tr><tr><td><img src="{{ STATIC_URL }}dashboard/img/server_pc.png" width="100" height="100" onclick=new_cpt_selected("'+title+'");></td></tr></table></td>';
+			if(i==8){
+                                content +='</tr></table>';
+                                x.innerHTML = content;
+			}
+		}
+	}
+
+
+	//MAIN PARAMETERS
+        //************************************
+        var refresh_interval = 20000;
+	var max_wait_interval = 15000; //How much time ajax call is waiting for an answer before removing the calling request!
+        var flag_testing = false;
+	var flag_demo = true; //If true, static arrays are constructed in order to reduce latency; if false, the data is retrieved using Openstack clients (Heat, Nova and Keystone)
+	//************************************
+
+	var association = [];
+
+	//Google Gauges variables and options
+        //-------------------------------------------------------
+	var host_data = []; var host_chart = []; var host_options = [];
+	var vm_data = []; var vm_chart = []; var vm_options = [];
+
+        google.charts.load('current', {'packages':['gauge']});
+        //google.charts.setOnLoadCallback(initialize);
+	//-------------------------------------------------------
+
+
+
+
+	window.onload = function(){
+		getAppNames();
+	};
+
+
+	//SPINNER FUNCTIONS
+	//------------------------------------------------------------------------------
+
+
+	function start_spinner(){
+
+                var loader_pathfile = "{{ STATIC_URL }}dashboard/img/ajax-loader.gif";
+                //document.getElementById('loading_bar').style.visibility='visible';
+                document.getElementById('loading_bar').style.width='100%';
+                document.getElementById('loading_bar').style.height='100%';
+                document.getElementById('loading_bar').style.position='fixed';//'absolute';//'fixed';
+                document.getElementById('loading_bar').style.top='0';
+                document.getElementById('loading_bar').style.left='0';
+                document.getElementById('loading_bar').style.zIndex='9999';
+                document.getElementById('loading_bar').style.background="url('"+loader_pathfile+"') no-repeat center center rgba(0,0,0,0.25)";
+		//setTimeout(function(){document.getElementById('loading_bar').style.visibility='hidden';},3000);
+	}
+
+	//------------------------------------------------------------------------------
+
+
+	function get_date(d){
+		date_now = "";
+		d.getHours() < 10 ? date_now +="0"+d.getHours()+":" : date_now +=d.getHours()+":";
+		d.getMinutes() < 10 ? date_now +="0"+d.getMinutes()+":" : date_now +=d.getMinutes()+":";
+		d.getSeconds() < 10 ? date_now +="0"+d.getSeconds() : date_now +=d.getSeconds();
+		return date_now;
+	}
+
+
+	function new_cpt_selected(title){
+		if(flag_testing){
+			var d = new Date();
+			document.getElementById('pool').innerHTML = "button pressed at: <b>"+get_date(d)+"</b>";
+		}
+
+
+		clearInterval($("#instances_box").data("thread"));
+		clearInterval($("#novacpt_box").data("thread"));
+
+		if(flag_testing){
+			d = new Date();
+			document.getElementById('host').innerHTML = "Intervals cleared at: <b>"+get_date(d)+"</b>";
+		}
+
+		vm_data = []; vm_chart = [];
+		host_data = []; host_chart = [];
+
+		drawHostChart(title);
+		drawVmCharts(title);
+	}
+
+
+
+	function getAppNames(){
+		start_spinner();
+		document.getElementById('loading_bar').style.visibility='visible';
+
+		create_instances_table();
+
+
+		if(flag_demo){
+			//DEMO (static)
+        	        association = [];
+                        association.push({'stack_id': u'<stack_id>', 'stack_name': u'<stack_name>', 'resources': [{'resource_name': u'<resource_name>', 'resource_id': u'<resource_id>'}], 'application_name': '<custom_application_name>'}, {...});
+			document.getElementById('loading_bar').style.visibility='hidden';
+		}
+		else{
+			//Standard
+			$.ajax({
+				type: 'GET',
+				url: 'AssociateVmAppName',
+				success : function(json) {
+
+					//document.getElementById("instances_box").innerHTML= '<pre>'+JSON.stringify(json,null,"\t")+'</pre>';
+					for(i=0;i<json.length;i++){
+						for(j=0;j<json[i].resources.length;j++){
+							association.push({"resource_id": json[i].resources[j].resource_id, "resource_name": json[i].resources[j].resource_name, "application_name": json[i].application_name});
+						}
+					}
+					document.getElementById('loading_bar').style.visibility='hidden';
+					//alert(JSON.stringify(association));
+				}
+			});
+		}
+	}
+
+
+
+
+								//ITERATIVE FUNCTIONS
+	//-------------------------------------------------------------------------------------------------------------------------------------
+	function iterate_drawHostChart(title){
+		clearInterval($("#novacpt_box").data("thread"));
+		$("#novacpt_box").data("thread", null);
+		$("#novacpt_box").data("thread",
+
+			setInterval( function(){
+				$.ajax({
+					type: 'GET',
+					url: "UpdateHostGauges",
+					data: {host: title},
+					success : function(json) {
+
+						for(i=0;i<json.length;i++){
+
+							var metric_volume = json[0].metrics[i].counter_volume;
+							host_data[i].setValue(0,0, metric_volume);
+							host_chart[i].draw(host_data[i], host_options[i]);
+						}
+					},
+					timeout: max_wait_interval,
+					error: function(json){alert('delay Hosts');}
+				})
+			}, refresh_interval)
+		);
+	}
+
+
+	function iterate_drawVmsCharts(title){
+		clearInterval($("#instances_box").data("thread"));
+		$("#instances_box").data("thread", null);
+		$("#instances_box").data("thread",
+
+			setInterval( function(){
+				$.ajax({
+					type: 'GET',
+					url: "UpdateVmsGauges",
+					data: {host: title},
+					success : function(json) {
+
+                                                if (json.length != vm_data.length){
+							drawVmCharts(title);
+						}
+						else{
+
+							for(i=0;i<json.length;i++){
+								for(j=0; j<json[i].metrics.length; j++){
+
+									var metric_volume = json[i].metrics[j].counter_volume;
+									var max_volume =json[i].metrics[j].range;
+
+									vm_data[i][j].setValue(0,0, metric_volume);
+
+									if(json[i].metrics[j].counter_name == "mem_used"){
+										vm_options[i][j] = {
+											//width: 1000, height: 120,
+											yellowFrom: 0.75 * max_volume, 
+											yellowTo: 0.9 * max_volume,
+											redFrom: 0.9 * max_volume, 
+											redTo: max_volume,
+											minorTicks: 5,
+											max: max_volume}
+									}
+									vm_chart[i][j].draw(vm_data[i][j], vm_options[i][j]);
+								}
+							}
+						}
+					},
+					timeout: max_wait_interval,
+					error: function(json){alert('delay Hosts');}
+				})
+			}, refresh_interval)
+		);
+	}
+	//-------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+							// New scenario
+        //-------------------------------------------------------------------------------------------------------------------------------------
+	function drawHostChart(title) {
+		start_spinner();
+		document.getElementById('loading_bar').style.visibility='visible';
+
+		var cpt_node = document.getElementById("novacpt_box");
+		cpt_node.innerHTML = "";
+
+		//Some fancy fieldset
+		//---------------------------------------------------------------------------------------------------
+		var fieldset_legend_open ="<fieldset style='font-family: sans-serif; border: 5px solid #1F497D; border-radius: 5px; padding: 10px;'> \
+			<legend style='background: #1F497D; color: #fff; padding: 5px 10px ; font-size: 15px; border-radius: 5px; box-shadow: 0 0 0 5px #ddd; width:auto;'>"+title+"</legend>";
+		var fieldset_legend_close="</legend></fieldset>";
+		//---------------------------------------------------------------------------------------------------
+
+		$.ajax({
+			type: 'GET',
+			url: "UpdateHostGauges",
+			data: {host: title},
+
+			success : function(json) {
+				//alert(JSON.stringify(json));
+				/*
+				//POST HOSTS: 
+				[
+					{'metrics': [
+						{'counter_name': u'cpu.load.1min', 'metric_position': 0, 'counter_volume': 4.33}, 
+						{'counter_name': 'memory.used', 'metric_position': 1, 'counter_volume': 0},
+						{'counter_name': u'max_jitter', 'metric_position': 2, 'counter_volume': 7.162},
+						{'counter_name': u'avg_packetloss', 'metric_position': 3, 'counter_volume': 0.0055}, 
+					], 
+					'resource_id': u'nova-cpt1'
+					}
+				]
+				*/
+
+				var col = "";
+				var metric_name_cols = "";
+
+				for(k=0;k<json[0].metrics.length;k++){
+					{% set node  = "node"+k+json[0].metrics[k].counter_name+"" %}
+					
+					if(k==0) col = "<td><div id='{{ node }}' title='"+title+"' style='width: 135px; height: 120px; display:inline-block;'></div>";
+					else if(k==json[0].metrics.length-1) col +="<div id='{{ node }}' title='"+title+"' style='width: 135px; height: 120px; display:inline-block;'></div></td>";
+					else col += "<div id='{{ node }}' title='"+title+"' style='width: 135px; height: 120px; display:inline-block;'></div>";
+
+					metric_name_cols += "<td id='"+json[0].metrics[k].counter_name+k+" 'width='16%' align='center'>"+json[0].metrics[k].counter_name+" ("+json[0].metrics[k].counter_unit+")</td>";
+
+					if(k==json[0].metrics.length-1){
+						//Draw the gauges and the labels (intialization)
+						fieldset_and_gauges_start = fieldset_legend_open+"<table><tr>"+col+"</tr></table><table style='width: 720px;'><tr>";
+						cpt_node.innerHTML = fieldset_and_gauges_start + metric_name_cols +fieldset_legend_close;
+
+						for(i=0;i<json[0].metrics.length;i++){
+
+							var metric_volume = json[0].metrics[i].counter_volume;
+							var max_volume = json[0].metrics[i].range;
+
+							host_data[i] = new google.visualization.DataTable();
+							host_data[i].addColumn('number');
+							host_data[i].addRow([metric_volume]);
+
+							host_options[i] = {
+								//width: 1000, height: 120,
+								yellowFrom: 0.75 * max_volume, 
+								yellowTo: 0.9 * max_volume,
+								redFrom: 0.9 * max_volume,
+								redTo: max_volume,
+								minorTicks: 5,
+								//min: 0,
+								max: max_volume
+							}
+							
+							host_chart[i] = new google.visualization.Gauge(document.getElementById("node"+i+json[0].metrics[i].counter_name));
+							host_chart[i].draw(host_data[i], host_options[i]);
+						}
+					}
+				}
+				iterate_drawHostChart(title);
+			},
+			timeout: max_wait_interval,
+			error: function(json){ drawHostChart(title); }
+		});
+
+	}
+
+
+
+	function drawVmCharts(title){
+		start_spinner();
+
+		document.getElementById('loading_bar').style.visibility='visible';
+		//document.getElementById("instances_box").innerHTML = "";
+                vms_node = document.getElementById("instances_box");
+		vms_node.innerHTML = "";
+
+		var vms = [];
+		var temp_metrics = [];
+
+		clearInterval($("#instances_box").data("thread"));
+		$("#instances_box").data("thread", null);
+
+
+		$.ajax({
+			type: 'GET',
+			url: "UpdateVmsGauges",
+			data: {host: title},
+			success : function(json) {
+				/*
+				[
+					{
+						'application_name': '--', 
+						'vm_name': u'noisy-big-2', 
+						'metrics': [
+								{'counter_name': 'cpu_util', 'metric_position': 0, 'counter_volume': 0}, 
+								{'counter_name': u'cpu_used', 'metric_position': 1, 'counter_volume': 0.0}, 
+								{'counter_name': u'mem_used', 'metric_position': 2, 'counter_volume': 547.0}
+						], 
+						'resource_id': u'03d05707-9e0d-4bc5-98dd-c627f2b9b3eb'
+					}, 
+					{
+						'application_name': '--', 
+						'vm_name': u'vlan1_loadgen2', 
+						'metrics': [
+							{'counter_name': 'cpu_util', 'metric_position': 0, 'counter_volume': 0}, 
+							{'counter_name': 'cpu_used', 'metric_position': 1, 'counter_volume': 0}, 
+							{'counter_name': 'mem_used', 'metric_position': 2, 'counter_volume': 0}
+						], 
+						'resource_id': u'c3e9c4a5-7917-43f7-96d6-57de535ef62c'
+					}
+				]
+
+				*/
+				//alert(json.length);
+
+				var new_div = "";
+
+				//Some fancy fieldset
+				//---------------------------------------------------------------------------------------------------
+				var fieldset_legend_open ="<fieldset style='font-family: sans-serif; border: 5px solid #1F497D; border-radius: 5px; padding: 10px;'> \
+					<legend style='background: #1F497D; color: #fff; padding: 5px 10px ; font-size: 15px; border-radius: 5px; box-shadow: 0 0 0 5px #ddd; width:auto;'>VMs inside "+title+"</legend>";
+				var fieldset_legend_close="</legend></fieldset>";
+				//---------------------------------------------------------------------------------------------------
+
+                                vm_data = [];
+				vm_chart = [];
+				vm_options = [];
+
+				for(i=0;i<json.length;i++){
+
+					var gauges_group = "";
+					vm_data[i] = [];
+					vm_chart[i] = [];
+					vm_options[i] = [];
+
+					var metric_name_cols ="<table style='width: 360px;'><tr>";
+
+					for(k=0;k<json[i].metrics.length;k++){
+						metric_name_cols += "<td id='"+json[i].metrics[k].counter_name+" 'width='33%' align='center'>"+json[i].metrics[k].counter_name+" ("+json[i].metrics[k].counter_unit+")</td>";
+
+						vm_data[i][k] = new google.visualization.DataTable();
+						vm_data[i][k].addColumn('number');
+						vm_data[i][k].addRow([json[i].metrics[k].counter_volume]);
+
+						max = json[i].metrics[k].range;
+
+						vm_options[i][k] = {
+							//width: 1000, height: 120,
+							yellowFrom: 0.75 * max, 
+							yellowTo: 0.9 * max,
+							redFrom: 0.9 * max, 
+							redTo: max,
+							minorTicks: 5,
+							max: max
+						};
+
+						gauges_group += "<div id='vm_node"+i+""+k+json[i].metrics[k].counter_name+"' style='width: 120px; height: 120px; display:inline-block;'></div>";
+					}
+					metric_name_cols += "</tr></table>";
+
+
+					var col = "<td style='padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 20px;'><center>";
+
+					if(json[i].application_name != "--" && json[i].application_name)
+						col += "<table><tr><td><b>APP_NAME: "+json[i].application_name+"</b></td></tr><tr><td><b>VM_NAME: "+json[i].vm_name+"</b></td></tr></table>";
+					else
+						col += "<table><tr><td><b>VM_NAME: "+json[i].vm_name+"</b></td></tr></table>";
+
+					col += "</center>"+ gauges_group + metric_name_cols + "</td>";
+
+					//FIX: if only one vm to draw...
+					if(json.length == 1){
+						new_div += "<table id='vms_chart_table'><tr>"+col+"</tr></table>";
+						var vms_chart_div = document.getElementById("instances_box");
+						vms_chart_div.innerHTML += fieldset_legend_open + new_div + fieldset_legend_close;
+
+						for(k=0;k<json[0].metrics.length;k++)
+							 vm_chart[0][k] = new google.visualization.Gauge(document.getElementById("vm_node0"+k+json[0].metrics[k].counter_name));
+					}
+					else{
+						if(i==0) new_div += "<table id='vms_chart_table'><tr>"+col;
+						else if(i%3==2 && i!=json.length-1) new_div += col+"</tr><tr>";
+						else if(i==json.length-1){
+							new_div += col+"</tr></table>";
+							var vms_chart_div = document.getElementById("instances_box");
+
+							vms_chart_div.innerHTML += fieldset_legend_open + new_div + fieldset_legend_close;
+
+							for(l=0;l<json.length;l++){
+								for(k=0;k<json[l].metrics.length;k++){
+									vm_chart[l][k] = new google.visualization.Gauge(document.getElementById("vm_node"+l+""+k+json[i].metrics[k].counter_name));
+									//vm_chart[l][k].draw(vm_data[l][k], vm_options[l][k]);
+								}
+							}					
+						}
+						else new_div += col;
+					}
+				}
+				for(i=0;i<json.length;i++){
+					for(k=0;k<json[i].metrics.length;k++)
+						vm_chart[i][k].draw(vm_data[i][k], vm_options[i][k]);
+				}
+				document.getElementById('loading_bar').style.visibility='hidden';
+				iterate_drawVmsCharts(title);
+			},
+			timeout: max_wait_interval,
+			error: function(json){alert('delay VMs'); drawVmCharts(title);}
+		});
+	}
+        //-------------------------------------------------------------------------------------------------------------------------------------
+</script>
+{% endblock %}
