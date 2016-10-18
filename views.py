@@ -37,15 +37,11 @@ ifaces_list = [e.strip() for e in config.get('DEFAULT', 'ifaces_list').split(','
 host_metrics_list = [e.strip() for e in config.get('Host_metrics', 'host_metrics_list').split(',')]
 host_units_list = [e.strip() for e in config.get('Host_metrics', 'host_units_list').split(',')]
 host_ranges_list = [e.strip() for e in config.get('Host_metrics', 'host_ranges_list').split(',')]
-host_yellows_list = [e.strip() for e in config.get('Host_metrics', 'host_yellows_list').split(',')]
-host_reds_list = [e.strip() for e in config.get('Host_metrics', 'host_reds_list').split(',')]
 
 # VMS
 vm_metrics_list = [e.strip() for e in config.get('Vm_metrics', 'vm_metrics_list').split(',')]
 vm_units_list = [e.strip() for e in config.get('Vm_metrics', 'vm_units_list').split(',')]
 vm_ranges_list = [e.strip() for e in config.get('Vm_metrics', 'vm_ranges_list').split(',')]
-vm_yellows_list = [e.strip() for e in config.get('Vm_metrics', 'vm_yellows_list').split(',')]
-vm_reds_list = [e.strip() for e in config.get('Vm_metrics', 'vm_reds_list').split(',')]
 
 # VMS FOR THE DEMO
 demo_vms_list = [e.strip() for e in config.get('Demo_vms', 'demo_vms_list').split(',')]
