@@ -20,7 +20,7 @@ import logging
 from openstack_dashboard.api import ceilometer, nova
 
 
-import threading, time
+import threading, time, requests
 
 import keystoneclient.v2_0.client as ksclient
 from heatclient import client as heat_client
@@ -48,7 +48,13 @@ demo_vms_list = [e.strip() for e in config.get('Demo_vms', 'demo_vms_list').spli
 
 
 #Admin token and delta_t initialization
-admin_token = ""
+ENV_HEAT_OS_API_VERSION = "1"
+ENV_OS_AUTH_URL = "http://keystone:35357/v2.0"
+ENV_OS_USERNAME = "<USERNAME>"
+ENV_OS_TENANT_NAME = "<TENANT_NAME>"
+ENV_OS_PASSWORD = "<PASSWORD>"
+
+headers = {}
 delta_t = 60
 
 #Stack object
@@ -67,13 +73,6 @@ if(flag_demo):
 else:
     ass_vm_appname_threads = []
 
-    ENV_HEAT_OS_API_VERSION = "1"
-    ENV_OS_AUTH_URL = "http://keystone:35357/v2.0"
-    ENV_OS_USERNAME = "admin"
-    ENV_OS_TENANT_NAME = "admin"
-    ENV_OS_PASSWORD = "<PASSWORD>"
-
-
     # Static heat parameters
     heat_service_id = "<heat_service_id>"
     fixed_heat_endpoint = "http://heat:8004/v1/%(tenant_id)s"
@@ -81,22 +80,80 @@ else:
 
 
 
+def change_label(metric_name):
+    new_label = ""
 
+    if metric_name.startswith("hardware."):
+        metric_name = metric_name.split("hardware.")
+
+        if metric_name[1] == "memory.used":
+            new_label = "mem_used"
+
+        elif metric_name[1] == "network.outgoing.bytes.rate":
+            new_label = "outgoing.bytes"
+
+        else:
+            new_label = metric_name[1]
+
+    elif metric_name.startswith("host."):
+        metric_name = metric_name.split("host.")
+        new_label = metric_name[1]
+
+    else:
+        return metric_name
+
+    return new_label
+
+
+def change_scale(metric_name, metric_volume):
+
+    if metric_name == "outgoing.bytes":
+        #B/s -> Mb/s  => [  x / (1000^2) ] *8
+        return round((8* metric_volume / 1000 / 1000),3) 
+
+    else:
+        return metric_volume
+
+
+def get_appname_and_resourcename(resource_id):
+
+    global stacks_obj
+
+    appname_and_resourcename = []
+    for stack in stacks_obj:
+        flag = False
+        for resource in stack["resources"]:
+            if resource["resource_id"] == resource_id:
+                appname_and_resourcename.append({"application_name": stack["application_name"], "resource_name": resource["resource_name"]})
+                flag = True
+                break
+        if flag:
+            break
+
+    return appname_and_resourcename
+
+
+    
 class IndexView(views.APIView):
     template_name = 'admin/instancegaugescw/index.html'
 
     #Admin token section
-    global admin_token
-    os.system("curl -i \'http://keystone:5000/v2.0/tokens\' -X POST -H \"Content-Type: application/json\" -H \"Accept: application/json\"  -d \'{\"auth\": {\"tenantName\": \"admin\", \"passwordCredentials\": {\"username\": \"admin\", \"password\": \"<PASSWORD>\"}}}\' > /tmp/adm_token; sed \'1,8d\' /tmp/adm_token > /tmp/temp; cat /tmp/temp | jq \'.access.token.id\' > /tmp/adm_token")
-    admin_token = subprocess.check_output("sed -e \'s/\"//g\' /tmp/adm_token", shell=True).rstrip()
+    global headers
 
+    keystone = ksclient.Client(
+        auth_url=ENV_OS_AUTH_URL,
+        username=ENV_OS_USERNAME,
+        password=ENV_OS_PASSWORD,
+        tenant_name= ENV_OS_TENANT_NAME
+    )
+
+    #Headers used to retrieve data from mongo using ceilometerclient
+    headers = {'User-Agent': 'ceilometerclient.openstack.common.apiclient',  'X-Auth-Token': keystone.auth_token, 'Content-Type': 'application/json'}
 
 
 # HOSTS GAUGES Management
 # ------------------------------------------------------------------------------------------------------------------------
 def UpdateHostGauges(request):
-
-    global admin_token, delta_t
 
     hosts = []
     query_metrics = ""
@@ -169,12 +226,8 @@ def UpdateHostGauges(request):
                 query_vms = r'{"filter": "{\"and\":['+str(counter_name)+r','+start+stop+str(query_vms)+r']}",'+str(orderby)+r','+str(limit_vms)+'}'
             else:
                 query_vms = r'{"filter": "{\"and\":['+str(counter_name)+r','+start+stop+r'{\"or\":['+str(query_vms)+r']}]}",'+str(orderby)+r','+str(limit_vms)+'}'
- 
-            host_file = open("/tmp/hosts_query.txt", "w")
-            host_file.write(query_vms)
-            host_file.close()
-            output = subprocess.check_output("curl -X POST -H \'User-Agent: ceilometerclient.openstack.common.apiclient\' -H \'X-Auth-Token: "+str(admin_token)+"\' -H \'Content-Type: application/json\' --data @/tmp/hosts_query.txt http://ceilometer:8777/v2/query/samples", shell=True)
 
+            output = requests.post('http://ceilometer:8777/v2/query/samples', headers=headers, data=query_vms).text
             result = json.loads(output)
             #LOG.debug('QUERY: %s', query_vms)
             #LOG.debug('RESULT: %s', result)
@@ -216,10 +269,7 @@ def UpdateHostGauges(request):
                     limit_rate = r'"limit": 5'
 
                     query = r'{"filter": "{\"and\":['+str(iface_name)+r','+start+stop+outgoingrate_resource+r']}",'+str(orderby)+r','+str(limit_rate)+'}'
-                    host_file = open("/tmp/hosts_query.txt", "w")
-                    host_file.write(query)
-                    host_file.close()
-                    result = subprocess.check_output("curl -X POST -H \'User-Agent: ceilometerclient.openstack.common.apiclient\' -H \'X-Auth-Token: "+str(admin_token)+"\' -H \'Content-Type: application/json\' --data @/tmp/hosts_query.txt http://ceilometer:8777/v2/query/samples", shell=True)
+                    result = requests.post('http://ceilometer:8777/v2/query/samples', headers=headers, data=query).text
                     #LOG.debug('QUERY: %s', query)
                     #LOG.debug('IFACE SAMPLES: %s', json.loads(result))
                     samples.append(json.loads(result))
@@ -232,10 +282,7 @@ def UpdateHostGauges(request):
                 query_metrics += r',{\"=\":{\"counter_name\":\"'+str(host_metrics_list[i])+r'\"}}'
 
     query = r'{"filter": "{\"and\":['+str(query_resources)+r','+start+stop+r'{\"or\":['+str(query_metrics)+r']}]}",'+str(orderby)+r','+str(limit)+'}'
-    host_file = open("/tmp/hosts_query.txt", "w")
-    host_file.write(query)
-    host_file.close()
-    result = subprocess.check_output("curl -X POST -H \'User-Agent: ceilometerclient.openstack.common.apiclient\' -H \'X-Auth-Token: "+str(admin_token)+"\' -H \'Content-Type: application/json\' --data @/tmp/hosts_query.txt http://ceilometer:8777/v2/query/samples", shell=True)#.rstrip()
+    result = requests.post('http://ceilometer:8777/v2/query/samples', headers=headers, data=query).text
 
     samples.append(json.loads(result))
     LOG.debug('SAMPLES: %s', samples)
@@ -309,57 +356,6 @@ def UpdateHostGauges(request):
 
 
 
-def change_label(metric_name):
-    new_label = ""
-
-    if metric_name.startswith("hardware."):
-        metric_name = metric_name.split("hardware.")
-
-        if metric_name[1] == "memory.used":
-            new_label = "mem_used"
-
-        elif metric_name[1] == "network.outgoing.bytes.rate":
-            new_label = "outgoing.bytes"
-
-        else:
-            new_label = metric_name[1]
-
-    elif metric_name.startswith("host."):
-        metric_name = metric_name.split("host.")
-        new_label = metric_name[1]
-
-    else:
-        return metric_name
-
-    return new_label
-
-
-def change_scale(metric_name, metric_volume):
-
-    if metric_name == "outgoing.bytes":
-        #B/s -> Mb/s  => [  x / (1000^2) ] *8
-        return round((8* metric_volume / 1000 / 1000),3) 
-
-    else:
-        return metric_volume
-
-
-def get_appname_and_resourcename(resource_id):
-
-    global stacks_obj
-
-    appname_and_resourcename = []
-    for stack in stacks_obj:
-        flag = False
-        for resource in stack["resources"]:
-            if resource["resource_id"] == resource_id:
-                appname_and_resourcename.append({"application_name": stack["application_name"], "resource_name": resource["resource_name"]})
-                flag = True
-                break
-        if flag:
-            break
-
-    return appname_and_resourcename
 
 
 
@@ -367,7 +363,6 @@ def get_appname_and_resourcename(resource_id):
 # VM GAUGES Management
 # ------------------------------------------------------------------------------------------------------------------------
 def UpdateVmsGauges(request):
-    global admin_token, delta_t
 
     vms_per_host = []
     query = ""
@@ -430,10 +425,7 @@ def UpdateVmsGauges(request):
         else:
             query = r'{"filter": "{\"and\":['+str(counter_name)+r','+start+stop+r'{\"or\":['+str(query_vms)+r']}]}",'+str(orderby)+r','+str(limit)+'}'
 
-        host_file = open("/tmp/vms_query.txt", "w")
-        host_file.write(query)
-        host_file.close()
-        result = subprocess.check_output("curl -X POST -H \'User-Agent: ceilometerclient.openstack.common.apiclient\' -H \'X-Auth-Token: "+str(admin_token)+"\' -H \'Content-Type: application/json\' --data @/tmp/vms_query.txt http://ceilometer:8777/v2/query/samples", shell=True)
+        result = requests.post('http://ceilometer:8777/v2/query/samples', headers=headers, data=query).text
 
         samples.append(json.loads(result))
         #LOG.debug('RESULT: %s', json.loads(result))
@@ -594,7 +586,6 @@ def AssociateVmAppName(request):
 
     for stack in heat.stacks.list(global_tenant=True):
 
-        if (count < stacks_limit):
         LOG.debug('STACK NAME: %s', stack.stack_name)
         t = threading.Thread(target=getVmsAppNameThread, args=(request, stack, stacks_obj))
         ass_vm_appname_threads.append(t)
@@ -604,7 +595,6 @@ def AssociateVmAppName(request):
 
     for t in ass_vm_appname_threads: t.join()
 
-    LOG.debug('PROVA %s %s', len(stacks_obj), stacks_number)
     LOG.debug('STACKS AND RESOURCES: %s', stacks_obj)
 
     return HttpResponse(json.dumps(stacks_obj),content_type="application/json")
